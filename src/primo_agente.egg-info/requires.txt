@@ -1,0 +1,10 @@
+openai
+python-dotenv
+pydantic
+
+[dev]
+ruff
+
+[test]
+pytest
+pytest-cov

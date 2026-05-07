@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: primo-agente
+Version: 0.1.0
+Summary: Mini demo agentic: tool locali + (opzionale) chiamata LLM via CLI
+Requires-Dist: openai
+Requires-Dist: python-dotenv
+Requires-Dist: pydantic
+Provides-Extra: test
+Requires-Dist: pytest; extra == "test"
+Requires-Dist: pytest-cov; extra == "test"
+Provides-Extra: dev
+Requires-Dist: ruff; extra == "dev"
