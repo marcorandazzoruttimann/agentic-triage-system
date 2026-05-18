@@ -2,7 +2,7 @@ import json
 import re
 from typing import Any, Dict
 
-from schemas.ticket import Ticket
+from schemas.ticket import TriageResult
 
 
 def _extract_json_block(text: str) -> str:
@@ -36,7 +36,7 @@ def _safe_json_load(json_str: str) -> Dict[str, Any]:
         raise ValueError(f"JSON non valido: {e}")
 
 
-def parse_llm_output(raw_output: str) -> Ticket:
+def parse_llm_output(raw_output: str) -> TriageResult:
     """
     Pipeline completa di parsing:
 
@@ -45,7 +45,7 @@ def parse_llm_output(raw_output: str) -> Ticket:
     3. Validazione con Pydantic
 
     Restituisce:
-    - oggetto Ticket valido
+    - oggetto TriageResult valido
 
     Solleva errore se:
     - JSON non trovato
@@ -61,8 +61,8 @@ def parse_llm_output(raw_output: str) -> Ticket:
 
     # 3. Validazione schema
     try:
-        ticket = Ticket(**data)
+        result = TriageResult(**data)
     except Exception as e:
-        raise ValueError(f"Errore validazione Ticket: {e}")
+        raise ValueError(f"Errore validazione TriageResult: {e}")
 
-    return ticket
+    return result

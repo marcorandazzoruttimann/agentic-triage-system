@@ -1,4 +1,6 @@
 .env
 .venv/
 logs/
+data/tickets.jsonl
 __pycache__/
+.pytest_cache/
