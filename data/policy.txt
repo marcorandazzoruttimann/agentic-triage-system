@@ -1,0 +1,39 @@
+===========================================================================
+IMPESUD AI AGENCY - MANUAL OPERATIVO E POLICY AZIENDALI INTERNE
+Ultimo aggiornamento: Maggio 2026
+===========================================================================
+
+1. POLICY DI PRICING E PROGETTI COMMERCIALI
+---------------------------------------------------------------------------
+1.1 Definizione Budget standard:
+- I progetti commerciali standard gestiti dal team di Triage hanno un valore stimato fino a 10.000€.
+- Tutte le richieste commerciali con un budget dichiaratamente SUPERIORE a 10.000€ (Progetti VIP/Enterprise) richiedono tassativamente un'escalation immediata al Manager di turno tramite il tool dedicato.
+
+1.2 Sconti e Agevolazioni:
+- Per progetti commerciali standard (fino a 10.000€) NON è autorizzato alcuno sconto autonomo.
+- Per progetti Enterprise (> 10.000€), il Manager può approvare uno sconto massimo del 5% sul totale del preventivo. L'agente non deve mai promettere lo sconto prima dell'approvazione del manager.
+
+
+2. POLICY DI RIMBORSO E RECESSI (CUSTOMER SUPPORT)
+---------------------------------------------------------------------------
+2.1 Rimborsi Tecnici ed Errori di Fatturazione:
+- I rimborsi completi per problemi tecnici o disservizi dell'infrastruttura possono essere approvati ed eseguiti solo se la richiesta perviene entro 14 giorni dall'attivazione o dal rinnovo del servizio.
+- Oltre i 14 giorni, non è previsto alcun rimborso monetario automatico. In casi eccezionali di gravi disservizi persistenti, la pratica va escalata al Manager per l'assegnazione di un "credito bonus" interno.
+
+2.2 Recesso per ripensamento (Clienti Consumer):
+- Il recesso per ripensamento segue le norme di legge vigenti ed è applicabile solo entro i primi 14 giorni dalla firma del contratto d'acquisto, a patto che l'erogazione dei servizi o dei corsi personalizzati non sia già iniziata.
+
+
+3. CRITERI DI ESCALATION CRITICA (SLA & SENTIMENT)
+---------------------------------------------------------------------------
+3.1 Sentiment dell'Utente:
+- Se l'analisi del testo del ticket rileva un sentiment classificato come "ARRABBIATO" (presenza di insulti, minacce di azioni legali, uso eccessivo di maiuscole o indicazione di gravi perdite finanziarie dovute ai nostri sistemi), l'agente deve sospendere la gestione standard e attivare immediatamente il tool 'notify_manager' indipendentemente dalla categoria del ticket o dal budget.
+
+3.2 SLA di Risposta:
+- Richieste standard (Assistenza / Informazioni): Risoluzione o risposta entro 24 ore lavorative.
+- Richieste Escalated/VIP (Manager notificato): Presa in carico del Manager entro 2 ore lavorative.
+
+
+===========================================================================
+FINE DEL DOCUMENTO - AD USO ESCLUSIVO DELL'AGENTE RISOLUTORE IMPESUD
+===========================================================================
