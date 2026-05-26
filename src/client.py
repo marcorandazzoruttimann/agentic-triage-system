@@ -1,7 +1,11 @@
+"""Client OpenAI: connessione e configurazione."""
+
 from dotenv import dotenv_values
 from openai import OpenAI
 
 from paths import ENV_PATH
+
+MODEL = "gpt-4.1-mini"
 
 
 def _openai_api_key_from_dotenv() -> str | None:
@@ -22,18 +26,3 @@ def get_client() -> OpenAI:
             f'API key non trovata in "{ENV_PATH}". Imposta OPENAI_API_KEY nel file.'
         )
     return OpenAI(api_key=api_key)
-
-
-def call_llm(prompt: str) -> str:
-    """Invia un prompt al modello e restituisce l'output testuale (temperature=0)."""
-    response = get_client().chat.completions.create(
-        model="gpt-4.1-mini",
-        temperature=0,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    content = response.choices[0].message.content
-    if not content:
-        raise ValueError("Risposta vuota dal modello")
-
-    return content.strip()

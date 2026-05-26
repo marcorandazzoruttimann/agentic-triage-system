@@ -29,7 +29,19 @@ L’abbonamento a Cursor **non è necessario** per questo argomento. Conta molto
 
 ## Stato attuale del progetto
 
-Il codice ha una gestione errori di **livello 1–2**: fail-fast con `ValueError`, boundary in `main.py`, parser con `raise ... from e` su JSON e Pydantic, test su alcuni percorsi di fallimento. Manca ancora una **gerarchia di eccezioni di dominio**.
+Il codice ha una gestione errori di **livello 1–2**: fail-fast con `ValueError`, boundary in `main.py`, parser con `raise ... from e` su JSON e Pydantic, nucleo loop in `logic.py` (`_run_agent_loop`), suite di **24 test** sui fallimenti principali e sui fallback di escalation. Manca ancora una **gerarchia di eccezioni di dominio**.
+
+### Nucleo agentico (`logic.py`) — riferimento rapido
+
+Il triage LLM vive in un unico loop (vedi [README — Nucleo del loop](README.md#nucleo-del-loop-logicpy)):
+
+1. `build_chat_messages` — input + few-shot + manuale IT  
+2. `_call_llm_with_tools` — prima risposta con `TOOLS_DEFINITION`  
+3. `_execute_tool_calls` — tool locali (se `tool_calls`)  
+4. `_apply_policy_fallback` — guardie policy con observation in conversation  
+5. `_request_final_json` + `parse_llm_output` — JSON validato (o content diretto se nessun tool)
+
+Gli errori di parsing/API nascono nei passi 2 e 5; il boundary in `main.py` li converte in `log_event` + `return None`.
 
 ### Pipeline e punti di fallimento
 
@@ -39,39 +51,92 @@ Ogni ticket attraversa snapshot append-only in `data/tickets.jsonl`:
 |------|--------|---------------|----------------------------|
 | 1 | `OPEN` + `save_ticket` | I/O su JSONL | Nessuna riga (o riga OPEN se save parziale) |
 | 2 | `load_it_manual()` | `FileNotFoundError` | Riga **OPEN** già scritta |
-| 3 | `call_llm()` | API key, rete, SDK OpenAI | Riga **OPEN** |
-| 4 | `parse_llm_output()` | JSON assente/invalido, schema Pydantic | Riga **OPEN** |
-| 5 | `enrich_priority()` | Ticket senza `priorita` | Riga **OPEN** (campi triage solo in memoria) |
-| 6 | `TRIAGED` + `save_ticket` | Validazione `Ticket` incompleto | Riga **OPEN** |
-| 7 | `assign_to_team()` + `save_ticket` | Categoria assente | Riga **TRIAGED** senza `team` |
+| 3 | `logic.triage_message()` (LLM, tool, `parse_llm_output`) | API key, rete, SDK, JSON/schema | Riga **OPEN** |
+| 4 | `enrich_priority()` | Ticket senza `priorita` | Riga **OPEN** (triage solo in memoria) |
+| 5 | `TRIAGED` + `save_ticket` | Validazione `Ticket` incompleto | Riga **OPEN** |
+| 6 | `assign_to_team()` + `save_ticket` | Categoria assente | Riga **TRIAGED** senza `team` |
 
 ```mermaid
 flowchart TD
-    A[user_input] --> B[OPEN save]
-    B --> C{manuale + LLM + parse}
-    C -->|errore| X[log + return None]
-    C -->|ok| D[enrichment]
-    D --> E[TRIAGED save]
-    E --> F[routing + save team]
-    F --> G[Ticket completo]
-    B --> H[(tickets.jsonl)]
-    E --> H
-    F --> H
+    Input[user_input] --> OpenSave["main: OPEN + save_ticket"]
+    OpenSave --> LoadManual["main: load_it_manual"]
+    LoadManual -->|FileNotFoundError| ErrBoundary["main: except + return None"]
+    LoadManual --> Triage["logic: triage_message"]
+
+    subgraph agentErrors [logic.py - _run_agent_loop]
+        Triage --> Build["build_chat_messages"]
+        Build --> Client["client.get_client"]
+        Client -->|API key assente| ErrBoundary
+        Client --> Llm1["_call_llm_with_tools"]
+        Llm1 --> HasTools{tool_calls?}
+        HasTools -->|sì| ExecTools["_execute_tool_calls"]
+        HasTools -->|no| Fallback["_apply_policy_fallback"]
+        ExecTools --> Fallback
+        Fallback --> NeedJson{serve JSON\nfinale?}
+        NeedJson -->|sì| FinalJson["_request_final_json"]
+        NeedJson -->|no| DirectContent["content prima risposta"]
+        FinalJson -->|risposta vuota / JSON invalido| ErrBoundary
+        DirectContent -->|vuoto| ErrBoundary
+        FinalJson --> Parse["parse_llm_output"]
+        DirectContent --> Parse
+        Parse -->|ValueError schema| ErrBoundary
+    end
+
+    Parse -->|ok| Enrich["main: enrich_priority"]
+    Enrich -->|senza priorita| ErrBoundary
+    Enrich --> TriagedSave["main: TRIAGED + save"]
+    TriagedSave --> Route["main: assign_to_team + save"]
+    Route -->|senza categoria| ErrBoundary
+    Route --> Done[Ticket completo con team]
+
+    OpenSave --> Jsonl[(tickets.jsonl)]
+    TriagedSave --> Jsonl
+    Route --> Jsonl
+    ErrBoundary --> LogErr["log_event error"]
 ```
 
 **Caso didattico importante:** se la chiamata LLM fallisce dopo il save `OPEN`, il ticket resta in JSONL senza classificazione. È uno **stato parziale** da discutere (rollback, flag `FAILED`, retry manuale).
 
 **Scenario E (ambiguo SALES vs IT, RAG):** il ticket «acquistare il corso + pagina pagamento non carica» può essere classificato **SALES** dall’LLM se ignora il manuale. In quel caso il ticket resta comunque `OPEN` o viene salvato `TRIAGED` con categoria errata — utile in classe per confrontare output con e senza voce «Portale pagamenti» in `data/manuale_it.txt`. Criterio di successo: `categoria` IT e `analisi_problema` che cita il MANUALE ed esclude SALES (vedi [README.md](README.md)).
 
+**Scenari G / H / I (policy commerciale e escalation):**
+
+| Scenario | Ticket demo | Rischio didattico | Comportamento atteso |
+|----------|-------------|-------------------|----------------------|
+| **G** — VIP | Ing. Rossi, 15.500€ (`VIP_ESCALATION_TICKET`) | LLM non chiama `notify_manager` | `_apply_policy_fallback` → observation in conversation → `_request_final_json`; log `manager_escalation` |
+| **H** — standard | Verdi & Partners, 7.500€ (`STANDARD_BUDGET_TICKET`) | Falso positivo escalation | Nessun `notify_manager` (sotto soglia 10k) |
+| **I** — ARRABBIATO | Portale down, 20k€, avvocato (`ANGRY_SENTIMENT_TICKET`) | LLM ignora policy §3.1 | Fallback: `search_policy` + `notify_manager`, poi JSON finale |
+
+I few-shot usano testi diversi (es. Dr. Esposito 15.000€, Bianchi 8.000€) per stabilizzare il formato senza copiare i demo.
+
+Il fallback **non è un errore**: è una guardia operativa in `_run_agent_loop` dopo la prima risposta LLM; le observation entrano nel contesto della seconda chiamata. Se un tool solleva eccezione, il boundary in `main.py` cattura `ValueError`/`OSError`.
+
+```mermaid
+flowchart TD
+    Input[user_input] --> Already{notify_manager\ngià invocato?}
+    Already -->|sì| End[Fine]
+    Already -->|no| VIP{budget > 10.000€?}
+    VIP -->|sì| N1[notify_manager priority 4]
+    VIP -->|no| Angry{sentiment ARRABBIATO?}
+    Angry -->|sì| SP[search_policy sentiment]
+    SP --> N2[notify_manager priority 4]
+    Angry -->|no| End
+    N1 --> End
+    N2 --> End
+```
+
+Dettaglio scenari e comandi: [README.md — Escalation e fallback](README.md#escalation-e-fallback-deterministico).
+
 ### Cosa esiste oggi
 
 | Cosa | Dove | Note |
 |------|------|------|
-| `raise ValueError(...)` | `client.py`, `parser.py`, `enrichment.py`, `router.py`, `schemas/ticket.py` | Messaggi in italiano |
+| `raise ValueError(...)` | `client.py`, `logic.py`, `parser.py`, `enrichment.py`, `router.py`, `schemas/ticket.py` | Messaggi in italiano |
 | `raise ... from e` | `parser.py` — `JSONDecodeError`, `ValidationError` | Catena traceback preservata |
-| Boundary tipizzato | `main.py` — `except (FileNotFoundError, ValueError, OSError)` | Non più `except Exception` generico |
-| Percorsi felici + fallimenti | `tests/` — 18 test, alcuni `pytest.raises` | Parser, store, enrichment, router |
-| Percorsi centralizzati | `paths.py` | Log e dati non dipendono dalla CWD |
+| Boundary tipizzato | `main.py` — `except (FileNotFoundError, ValueError, OSError)` | Cattura errori da tutta la pipeline |
+| Suite test essenziale | `tests/` — **24 test**, alcuni `pytest.raises` | Vedi tabella sotto |
+| Percorsi centralizzati | `paths.py` | Manuale, policy, ticket, log, `.env` |
+| Separazione agente / orchestrazione | `logic.py` (`_run_agent_loop`) vs `main.py` | Errori LLM nascono nel nucleo loop, gestiti in `main` |
 | Nessuna eccezione di dominio | — | Obiettivo dei moduli 2–4 |
 
 ### Boundary attuale (`main.py`)
@@ -86,7 +151,7 @@ except (FileNotFoundError, ValueError, OSError) as e:
 | Tipo catturato | Origine tipica | Esempio |
 |----------------|----------------|---------|
 | `FileNotFoundError` | `load_it_manual()` | `data/manuale_it.txt` assente |
-| `ValueError` | `client`, `parser`, Pydantic, enrichment, router | API key mancante, JSON invalido |
+| `ValueError` | `client`, `logic`, `parser`, Pydantic, enrichment, router | API key, risposta vuota LLM, JSON invalido |
 | `OSError` | `save_ticket`, `log_event` | Permessi, disco pieno |
 
 **Non catturato qui:** errori SDK OpenAI non mappati (es. `AuthenticationError`) — possono far crashare `process_ticket` se non derivano da `ValueError`/`OSError`. Modulo 5 opzionale.
@@ -112,26 +177,32 @@ Estrazione JSON con **parentesi bilanciate** (non regex greedy): riduce falsi po
 - JSONL: nessuna gestione esplicita di righe corrotte in `next_ticket_id()`.
 - Boundary non distingue messaggi per tipo (config vs parsing vs regole).
 - Stato parziale `OPEN` dopo fallimento LLM non documentato in UI/log dedicato.
-- Nessun test su `main.py` / `client.py` (solo moduli puri).
+- Suite essenziale (24 test): parser, store, enrichment, router, logic (mock loop + fallback in conversation), tools, main; nessun E2E con API reale.
 
 ### Flusso oggi vs obiettivo
 
 ```mermaid
-flowchart TD
-    subgraph today [Oggi]
-        A[user_input] --> B[process_ticket]
-        B --> C{FileNotFoundError / ValueError / OSError}
-        C -->|sì| D[log + print + None]
-        C -->|ok| E[Ticket con team]
+flowchart LR
+    subgraph today [Boundary oggi — main.py]
+        direction TB
+        T1[user_input] --> T2[process_ticket]
+        T2 --> T3[logic.triage_message]
+        T3 --> T4{FileNotFoundError\nValueError\nOSError}
+        T4 -->|catturato| T5["log_event + print\nreturn None"]
+        T4 -->|ok| T6[Ticket con team]
     end
-    subgraph target [Obiettivo]
-        F[user_input] --> G[process_ticket]
-        G --> H{tipo errore}
-        H -->|ConfigError| I[messaggio setup]
-        H -->|ParseError| J[messaggio parsing]
-        H -->|BusinessRuleError| K[messaggio regole]
-        H -->|StorageError| L[messaggio I/O]
-        H -->|ok| M[Ticket]
+    subgraph target [Obiettivo — handler dedicati]
+        direction TB
+        G1[user_input] --> G2[process_ticket]
+        G2 --> G3[logic.triage_message]
+        G3 --> G4{tipo errore}
+        G4 -->|ConfigError| G5[messaggio setup]
+        G4 -->|ParseError| G6[messaggio parsing LLM]
+        G4 -->|LLMError| G7[messaggio API/rete]
+        G4 -->|BusinessRuleError| G8[messaggio regole]
+        G4 -->|StorageError| G9[messaggio I/O JSONL]
+        G4 -->|ok| G10[Ticket]
+        G4 -->|Exception| G11[fallback imprevisto]
     end
 ```
 
@@ -227,7 +298,7 @@ Durata indicativa: 30 min – 2 ore per modulo.
 - Perché l’ultimo snapshot può avere `team` valorizzato ma status ancora `TRIAGED`?
 - `return None` è sempre la scelta giusta per un’API REST?
 
-**File da leggere:** `src/main.py`, `src/paths.py`, `src/parsing/parser.py`, `src/client.py`, `src/storage/store.py`, `src/tools/enrichment.py`, `src/tools/router.py`.
+**File da leggere:** `src/main.py`, `src/logic.py` (`_run_agent_loop`, `_apply_policy_fallback`), `src/client.py`, `src/prompts/triage_v1.py`, `src/parsing/parser.py`, `src/tools/office_tools.py`, `src/tools/registry.py`, `src/storage/store.py`, `src/tools/enrichment.py`, `src/tools/router.py`.
 
 **Output atteso:** schema flusso errori + tabella stati parziali su JSONL.
 
@@ -280,7 +351,7 @@ if __name__ == "__main__":
 1. Crea `src/errors.py` con `TriageError`, `ConfigError`, `ParseError`, `BusinessRuleError`.
 2. In `client.py`, sostituisci `ValueError` (API key) con `ConfigError`.
 3. In `main.py`, aggiungi `except ConfigError` **prima** del blocco generico.
-4. Aggiungi `tests/test_client.py` con `pytest.raises(ConfigError)`.
+4. Aggiungi un test con `pytest.raises(ConfigError)` (es. in `tests/test_logic.py` mockando `get_client`, o file `tests/test_errors.py`).
 
 **Prompt Cursor sicuro:**
 
@@ -300,12 +371,12 @@ if __name__ == "__main__":
 | `json.loads` fallisce | `ParseError` con `from e` |
 | `TriageResult` non valido | `ParseError` con `from e` da `ValidationError` |
 
-**Test già presenti / da estendere** in `tests/test_parser.py`:
+**Test già presenti** in `tests/test_parser.py`:
 
-- JSON valido (presente)
-- Markdown fence (presente)
-- Senza JSON (presente)
-- Da aggiungere: JSON con campi mancanti → `ParseError` dopo migrazione
+- JSON valido
+- Senza JSON → `ValueError`
+
+**Da aggiungere (opzionale):** JSON con campi mancanti → `ParseError` dopo migrazione; fence markdown se il modello restituisce ` ```json `.
 
 ```python
 import pytest
@@ -368,7 +439,7 @@ Migrare `enrichment.py` e `router.py` da `ValueError` a `BusinessRuleError`.
 
 | Area | File | Azione |
 |------|------|--------|
-| API OpenAI | `client.py` | Eccezioni SDK → `LLMError(TriageError)` |
+| API OpenAI | `logic.py` (+ `client.get_client`) | Eccezioni SDK → `LLMError(TriageError)` |
 | JSONL | `storage/store.py` | Riga corrotta in `next_ticket_id` → log + `StorageError` o skip documentato |
 | Stato parziale | `main.py` | Log evento `ticket_stuck_open` se fallisce post-OPEN; (avanzato) status `FAILED` |
 
@@ -393,6 +464,8 @@ Checklist Modulo 0 — aggiornare dopo ogni migrazione.
 | File | Tipo attuale | Esempio | Target |
 |------|--------------|---------|--------|
 | `client.py` | `ValueError` | API key mancante | `ConfigError` |
+| `logic.py` | `ValueError` | Risposta vuota dal modello | `LLMError` o `ParseError` |
+| `logic.py` | (nessuno) | `_apply_policy_fallback` — tool in conversation, non raise | Documentato in README; opz. `BusinessRuleError` se tool fallisce |
 | `parser.py` | `ValueError` + `from e` | JSON / schema | `ParseError` + `from e` |
 | `schemas/ticket.py` | `ValueError` (Pydantic) | Campi vuoti, TRIAGED incompleto | Resta in Pydantic; parser → `ParseError` |
 | `main.py` | `FileNotFoundError` | Manuale assente | `ConfigError` o handler dedicato |
@@ -405,28 +478,31 @@ Checklist Modulo 0 — aggiornare dopo ogni migrazione.
 
 ## Test e copertura fallimenti
 
-Suite attuale (`pytest tests/ -q`, `pythonpath = src` in `pyproject.toml`):
+Suite essenziale: **24 test** (`pytest tests/ -q`, `pythonpath = src` in `pyproject.toml`). Nessuna chiamata API reale.
 
-| Modulo | Test fallimento / edge |
-|--------|----------------------|
-| `parser.py` | Senza JSON, markdown fence |
-| `store.py` | TRIAGED senza `analisi_problema`, persistenza `team` |
-| `enrichment.py` | Keyword, senza priorità |
-| `router.py` | IT, BILLING, SALES, SECURITY |
-| `client.py` | — (da aggiungere, Modulo 2) |
-| `main.py` | — (integrazione opzionale con mock LLM) |
+| File test | Test | Cosa copre |
+|-----------|------|------------|
+| `test_parser.py` | 2 | JSON valido; assenza JSON → `ValueError` |
+| `test_store.py` | 2 | `next_ticket_id`; ultimo snapshot con `team` |
+| `test_enrichment.py` | 2 | `urgente` → HIGH; ticket senza priorità |
+| `test_router.py` | 4 | Routing IT, BILLING, SALES, SECURITY (parametrizzato) |
+| `test_logic.py` | 10 | Loop mock; budget/sentiment; fallback VIP/angry con 2 chiamate API; tool in conversation |
+| `test_tools.py` | 3 | `search_policy` file + sentiment; `notify_manager` + registry |
+| `test_main.py` | 1 | 9 scenari demo (A–I; G escalation, H budget sotto 10k, I sentiment ARRABBIATO) |
 
-Fixture condivise in `tests/conftest.py` (`triaged_ticket`, isolamento `TICKETS_PATH`).
+Fixture in `tests/conftest.py`: `triaged_ticket`, isolamento `TICKETS_PATH` su file temporaneo.
+
+**Non coperto dai test:** errori SDK OpenAI non mappati, righe JSONL corrotte, E2E con API key reale.
 
 ---
 
 ## Checklist di completamento
 
-- [ ] So disegnare il flusso di un errore da `call_llm` / `parse_llm_output` fino a `[ERRORE]` in console.
+- [ ] So disegnare il flusso di un errore da `logic.triage_message` → `_run_agent_loop` → `parse_llm_output` fino a `[ERRORE]` in console.
 - [ ] So spiegare lo **stato parziale OPEN** in `tickets.jsonl` se fallisce LLM o manuale.
 - [ ] Esistono almeno tre eccezioni di dominio sotto `TriageError`.
 - [ ] `ParseError` usa `raise ... from e` (già nel parser come `ValueError`; da rinominare).
-- [ ] Almeno cinque test con `pytest.raises` su percorsi di fallimento.
+- [ ] Almeno cinque test con `pytest.raises` su percorsi di fallimento (oggi: parser, enrichment, logic — estendere dopo `errors.py`).
 - [ ] Boundary in `main.py` con messaggi distinti per tipo.
 - [ ] Resta un `except Exception` finale come rete di sicurezza.
 - [ ] Nessun pattern superfluo (retry HTTP, middleware) per questa CLI.
@@ -435,19 +511,22 @@ Fixture condivise in `tests/conftest.py` (`triaged_ticket`, isolamento `TICKETS_
 
 ## Messaggio riassuntivo
 
-> Il progetto ha già boundary tipizzato, parser con `from e`, persistenza a snapshot (OPEN → TRIAGED → routed con `team`) e test sui fallimenti nei moduli core. Non serve rifare tutto né chiedere a Cursor un refactor unico.
+> Il progetto ha già boundary tipizzato, nucleo loop in `logic.py`, parser con `from e`, persistenza a snapshot (OPEN → TRIAGED → routed con `team`) e 24 test sui fallimenti nei moduli core. Non serve rifare tutto né chiedere a Cursor un refactor unico.
 >
 > Percorso: (1) mappa errori e stati parziali su JSONL, (2) esercizio minimale su `raise from`, (3) `errors.py` e migra un modulo per volta con test, (4) boundary con messaggi per tipo in `main.py`.
 >
-> Prossimo passo consigliato: **Modulo 2** (`ConfigError` + `test_client.py`).
+> Prossimo passo consigliato: **Modulo 2** (`errors.py` + `ConfigError` in `client.py` + test dedicato).
 
 ---
 
 ## Collegamenti
 
-- [README.md](README.md) — pipeline, CoT, manuale IT, scenari demo, setup
+- [README.md](README.md) — architettura, nucleo loop, pipeline, 9 scenari demo, setup
 - `src/main.py` — orchestrazione e boundary
-- `src/paths.py` — percorsi assoluti (log, dati, manuale, `.env`)
+- `src/logic.py` — nucleo loop agentico (`_run_agent_loop`, tool locali, fallback, JSON finale)
+- `src/client.py` — connessione OpenAI
+- `src/paths.py` — percorsi assoluti (log, dati, manuale, policy, `.env`)
 - `src/parsing/parser.py` — parsing e incapsulamento
+- `src/tools/office_tools.py` — tool `search_policy`, `notify_manager`
 - `tests/conftest.py` — fixture condivise
-- `tests/` — estendere qui i test sui fallimenti
+- `tests/test_*.py` — suite essenziale (24 test); estendere dopo ogni migrazione errori

@@ -1,8 +1,6 @@
 from paths import MANUALE_IT_PATH
-from client import call_llm
-from parsing.parser import parse_llm_output
-from prompts.triage_v1 import build_prompt
-from schemas.ticket import Ticket, TriageResult
+from logic import triage_message
+from schemas.ticket import Ticket
 from storage.store import next_ticket_id, save_ticket
 from tools.enrichment import enrich_priority
 from tools.logger import log_event
@@ -16,15 +14,7 @@ def load_it_manual() -> str:
 
 def process_ticket(user_input: str) -> Ticket | None:
     """
-    Pipeline Parte 1 + Parte 2:
-
-    1. Ricezione ticket
-    2. Assegnazione ID + save OPEN
-    3. Chiamata LLM + parsing/validazione (CoT + manuale IT)
-    4. Enrichment deterministico
-    5. Stato TRIAGED + save
-    6. Routing team + save snapshot finale
-    7. Logging
+    Orchestrazione ticket: persistenza, triage agentico, enrichment, routing.
     """
     try:
         log_event("ticket_received", {"input": user_input})
@@ -38,11 +28,7 @@ def process_ticket(user_input: str) -> Ticket | None:
         log_event("ticket_saved", {"ticket": ticket.model_dump(), "phase": "open"})
 
         manuale = load_it_manual()
-        prompt = build_prompt(user_input, manuale)
-        raw_output = call_llm(prompt)
-        log_event("llm_raw_response", {"response": raw_output})
-
-        triage: TriageResult = parse_llm_output(raw_output)
+        triage = triage_message(user_input, manuale)
         log_event("triage_cot", {"analisi_problema": triage.analisi_problema})
 
         ticket = ticket.model_copy(
@@ -75,19 +61,41 @@ def process_ticket(user_input: str) -> Ticket | None:
         print("\n[ERRORE]", str(e))
         return None
 
-# Ticket dello studente (Scenario D): simile al few-shot VPN, formulazione didattica ufficiale
+
 VPN_STUDENT_TICKET = (
     "Ciao, non riesco a collegarmi da casa alla rete aziendale, "
     "mi dà errore di connessione."
 )
 
-# Ticket ambiguo (Scenario E): SALES vs IT — risoluzione via manuale (RAG)
 AMBIGUOUS_RAG_TICKET = (
     "Vorrei acquistare il corso online ma il sito non carica "
     "la pagina di pagamento, potete aiutarmi?"
 )
 
-# Stesso dominio dei few-shot, testi diversi (A–C, E); D = ticket studente VPN
+DISCOUNT_POLICY_TICKET = (
+    "Salve, sono Marco. Volevo sapere se per l'acquisto di un corso aziendale "
+    "è previsto uno sconto sul budget."
+)
+
+VIP_ESCALATION_TICKET = (
+    "Salve, sono l'Ing. Rossi di ACME Srl. Il consiglio ha approvato 15.500€ "
+    "per il rollout della piattaforma cloud e chiediamo un incontro entro 48 ore "
+    "con un referente commerciale senior."
+)
+
+# Scenario H: budget standard sotto 10k (no escalation manager)
+STANDARD_BUDGET_TICKET = (
+    "Buongiorno, siamo la società Verdi & Partners. Disponiamo di 7.500 euro per un "
+    "corso Scrum Master certificato e vorremmo un preventivo entro la settimana."
+)
+
+# Scenario I: sentiment ARRABBIATO (policy §3.1) → search_policy + notify_manager
+ANGRY_SENTIMENT_TICKET = (
+    "SONO ESTREMAMENTE DELUSO! Il vostro portale è IN DOWN da 3 settimane e ho perso "
+    "oltre 20.000 euro di fatturato per colpa vostra. È INACCETTABILE! "
+    "Se non risolvete entro oggi contatterò il mio AVVOCATO e vi denuncio!"
+)
+
 DEMO_SCENARIOS: list[tuple[str, str]] = [
     (
         "A — IT (accesso email)",
@@ -103,18 +111,18 @@ DEMO_SCENARIOS: list[tuple[str, str]] = [
     ),
     ("D — IT / VPN (ticket studente)", VPN_STUDENT_TICKET),
     ("E — Ambiguo (SALES vs IT, RAG)", AMBIGUOUS_RAG_TICKET),
+    ("F — SALES / policy RAG (sconto)", DISCOUNT_POLICY_TICKET),
+    ("G — SALES VIP / escalation (>10k)", VIP_ESCALATION_TICKET),
+    ("H — SALES standard (budget <10k)", STANDARD_BUDGET_TICKET),
+    ("I — Sentiment ARRABBIATO (policy + escalation)", ANGRY_SENTIMENT_TICKET),
 ]
 
 
 def run_demo_scenarios() -> None:
-    """Esegue i 5 scenari di valutazione (incluso ambiguo RAG)."""
+    """Esegue i 9 scenari di valutazione (RAG, policy, escalation o meno)."""
     for label, message in DEMO_SCENARIOS:
         print(f"\n\n--- SCENARIO {label} ---")
         process_ticket(message)
-
-
-# Alias per compatibilità con invocazioni precedenti
-run_tests = run_demo_scenarios
 
 
 if __name__ == "__main__":
